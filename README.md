@@ -412,7 +412,7 @@ CREATE TABLE IF NOT EXISTS `__rate_limits` (
 );
 ```
 
-> MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1. Each check is wrapped in a transaction with `SELECT ... FOR UPDATE` to guarantee atomicity — this requires InnoDB (the default engine since MySQL 5.5).
+> MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1. SlidingWindow uses `GET_LOCK`/`RELEASE_LOCK` advisory locks around a transaction to serialise per-key access; FixedWindow and TokenBucket use `INSERT ... ON DUPLICATE KEY UPDATE` which is atomic without an explicit lock — this requires InnoDB (the default engine since MySQL 5.5).
 
 **Minimum version:** MySQL 5.7+ or MariaDB 10.2+. `DATETIME(6)` microsecond precision requires MySQL 5.6+ / MariaDB 5.3+.
 
