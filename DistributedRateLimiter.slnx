@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="DistributedRateLimiter.Core/DistributedRateLimiter.Core.csproj" />
+  <Project Path="DistributedRateLimiter.Providers.MsSql/DistributedRateLimiter.Providers.MsSql.csproj" />
+  <Project Path="DistributedRateLimiter.Providers.MySql/DistributedRateLimiter.Providers.MySql.csproj" />
+  <Project Path="DistributedRateLimiter.Providers.Postgres/DistributedRateLimiter.Providers.Postgres.csproj" />
+  <Project Path="DistributedRateLimiter/DistributedRateLimiter.csproj" />
+  <Project Path="DistributedRateLimiter.IntegrationTests/DistributedRateLimiter.IntegrationTests.csproj" />
+</Solution>

@@ -1,0 +1,235 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.x
+            9.x
+            10.x
+
+      - name: Restore
+        run: dotnet restore DistributedRateLimiter.slnx
+
+      - name: Build
+        run: dotnet build DistributedRateLimiter.slnx --no-restore --configuration Release
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-binaries
+          # The test project targets net8.0; its output folder contains all resolved
+          # project-reference DLLs, so no other project's bin/ is needed.
+          path: DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/
+          retention-days: 1
+
+  test-middleware:
+    name: Tests / Middleware
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-binaries
+          path: DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/
+
+      - name: Run tests
+        run: >-
+          dotnet test DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/DistributedRateLimiter.IntegrationTests.dll
+          --filter "FullyQualifiedName~DistributedRateLimiter.IntegrationTests.Middleware"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory "${{ github.workspace }}/test-results"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Middleware
+          path: test-results/results.trx
+          reporter: dotnet-trx
+          fail-on-error: true
+
+  test-postgres:
+    name: Tests / PostgreSQL
+    needs: build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ratelimiter_test
+          POSTGRES_USER: ratelimiter
+          POSTGRES_PASSWORD: ratelimiter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ratelimiter -d ratelimiter_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_CONNECTION_STRING: >-
+        Host=localhost;Port=5432;Database=ratelimiter_test;Username=ratelimiter;Password=ratelimiter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-binaries
+          path: DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/
+
+      - name: Run tests
+        run: >-
+          dotnet test DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/DistributedRateLimiter.IntegrationTests.dll
+          --filter "Provider=Postgres"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory "${{ github.workspace }}/test-results"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: PostgreSQL
+          path: test-results/results.trx
+          reporter: dotnet-trx
+          fail-on-error: true
+
+  test-mssql:
+    name: Tests / SQL Server
+    needs: build
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          SA_PASSWORD: "YourStrong!Passw0rd"
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStrong!Passw0rd' -Q 'SELECT 1' -No -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+
+    env:
+      MSSQL_CONNECTION_STRING: >-
+        Server=localhost,1433;Database=master;User Id=sa;Password=YourStrong!Passw0rd;TrustServerCertificate=True
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-binaries
+          path: DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/
+
+      - name: Run tests
+        run: >-
+          dotnet test DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/DistributedRateLimiter.IntegrationTests.dll
+          --filter "Provider=MsSql"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory "${{ github.workspace }}/test-results"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: SQL Server
+          path: test-results/results.trx
+          reporter: dotnet-trx
+          fail-on-error: true
+
+  test-mysql:
+    name: Tests / MySQL
+    needs: build
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_DATABASE: ratelimiter_test
+          MYSQL_USER: ratelimiter
+          MYSQL_PASSWORD: ratelimiter
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -u ratelimiter --password=ratelimiter"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MYSQL_CONNECTION_STRING: >-
+        Server=localhost;Port=3306;Database=ratelimiter_test;User=ratelimiter;Password=ratelimiter;
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-binaries
+          path: DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/
+
+      - name: Run tests
+        run: >-
+          dotnet test DistributedRateLimiter.IntegrationTests/bin/Release/net8.0/DistributedRateLimiter.IntegrationTests.dll
+          --filter "Provider=MySql"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory "${{ github.workspace }}/test-results"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: MySQL
+          path: test-results/results.trx
+          reporter: dotnet-trx
+          fail-on-error: true
