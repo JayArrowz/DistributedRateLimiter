@@ -94,7 +94,7 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
     }
 
     [SkippableFact]
-    public async Task SlidingWindow_RetryAfter_EqualsWindowDurationWhenDenied()
+    public async Task SlidingWindow_RetryAfter_IsWithinWindowWhenDenied()
     {
         SkipIfUnavailable();
         var key = Unique();
@@ -106,7 +106,68 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
 
         var r = await Store.SlidingWindowAsync(key, limit, window);
         Assert.False(r.Allowed);
-        Assert.Equal(window, r.RetryAfter);
+        Assert.True(r.RetryAfter > TimeSpan.Zero, "RetryAfter must be positive when denied");
+        Assert.True(r.RetryAfter <= window, "RetryAfter must not exceed the window duration");
+    }
+
+    [SkippableFact]
+    public async Task SlidingWindow_RetryAfterIsZeroWhenAllowed()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        var r = await Store.SlidingWindowAsync(key, 5, TimeSpan.FromMinutes(1));
+        Assert.True(r.Allowed);
+        Assert.Equal(TimeSpan.Zero, r.RetryAfter);
+    }
+
+    /// <summary>
+    /// Inserts the oldest in-window row at -30 s into a 60-second window, then
+    /// denies a request and verifies <see cref="RateLimitResult.RetryAfter"/> is
+    /// meaningfully shorter than the full window — proving accurate expiry calculation.
+    /// </summary>
+    [SkippableFact]
+    public async Task SlidingWindow_RetryAfter_IsShorterThanWindowWhenOldestRequestIsMidWindow()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int limit = 2;
+        var window = TimeSpan.FromSeconds(60);
+
+        // Oldest request is 30 seconds old — still inside the window.
+        var backdated = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(30);
+        await InsertRowDirectlyAsync(ConnectionString!, _tableName, key, backdated);
+
+        // Fill the remaining slot with a live request.
+        await Store.SlidingWindowAsync(key, limit, window);
+
+        // This request is denied. RetryAfter should be ~30 s, not the full 60 s.
+        var r = await Store.SlidingWindowAsync(key, limit, window);
+        Assert.False(r.Allowed);
+        Assert.True(r.RetryAfter > TimeSpan.Zero, "RetryAfter must be positive when denied");
+        Assert.True(r.RetryAfter < window, "RetryAfter must be less than the full window when oldest request is mid-window");
+    }
+
+    /// <summary>
+    /// Fires <c>concurrency</c> simultaneous requests against a single key and
+    /// verifies that exactly <c>limit</c> are allowed — proving the advisory lock
+    /// serialises writes and prevents double-counting under concurrency.
+    /// </summary>
+    [SkippableFact]
+    public async Task SlidingWindow_ConcurrentRequests_OnlyAllowedUpToLimit()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int limit = 5;
+        const int concurrency = 20;
+
+        var tasks = Enumerable.Range(0, concurrency)
+            .Select(_ => Store.SlidingWindowAsync(key, limit, TimeSpan.FromMinutes(1)))
+            .ToList();
+
+        var results = await Task.WhenAll(tasks);
+
+        var allowed = results.Count(r => r.Allowed);
+        Assert.Equal(limit, allowed);
     }
 
     [SkippableFact]
@@ -173,10 +234,6 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         Assert.False(r.Allowed, "Recent backdated rows must be counted in the sliding window");
         Assert.Equal(0, r.Remaining);
     }
-
-    // =========================================================================
-    // Fixed Window
-    // =========================================================================
 
     [SkippableFact]
     public async Task FixedWindow_AllowsRequestsWithinLimit()

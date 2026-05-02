@@ -68,7 +68,7 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
         await using var countCmd = conn.CreateCommand();
         countCmd.Transaction = tx;
         countCmd.CommandText = $"""
-            SELECT COALESCE(SUM(count), 0)
+            SELECT COALESCE(SUM(count), 0), MIN(window_start)
             FROM {_tableName}
             WHERE key = @key
               AND window_start > clock_timestamp() - @windowSeconds * interval '1 second';
@@ -76,14 +76,25 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
         countCmd.Parameters.AddWithValue("key", key);
         countCmd.Parameters.AddWithValue("windowSeconds", (int)window.TotalSeconds);
 
-        var count = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+        int count;
+        DateTimeOffset? oldestWindowStart;
+        await using (var reader = await countCmd.ExecuteReaderAsync(ct))
+        {
+            await reader.ReadAsync(ct);
+            count = Convert.ToInt32(reader[0]);
+            oldestWindowStart = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1);
+        }
         await tx.CommitAsync(ct);
+
+        var retryAfter = count > limit && oldestWindowStart.HasValue
+            ? oldestWindowStart.Value + window - DateTimeOffset.UtcNow
+            : TimeSpan.Zero;
 
         return new RateLimitResult(
             Allowed: count <= limit,
             Remaining: Math.Max(0, limit - count),
             Limit: limit,
-            RetryAfter: count > limit ? window : TimeSpan.Zero);
+            RetryAfter: retryAfter);
     }
 
     public async Task<RateLimitResult> FixedWindowAsync(
