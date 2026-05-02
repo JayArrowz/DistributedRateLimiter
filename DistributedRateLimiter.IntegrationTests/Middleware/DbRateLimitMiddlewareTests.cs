@@ -105,6 +105,19 @@ public sealed class DbRateLimitMiddlewareTests
     }
 
     [Fact]
+    public async Task SetsRetryAfterHeader_CeilsFractionalSeconds()
+    {
+        // 42.4 s must be reported as 43 — rounding down would let clients retry too early.
+        var retryAfter = TimeSpan.FromSeconds(42.4);
+        using var server = BuildServer(new FakeRateLimitStore(allowed: false, remaining: 0, limit: 3, retryAfter: retryAfter), 3, TimeSpan.FromMinutes(1));
+        using var client = server.CreateClient();
+
+        var response = await client.GetAsync("/");
+
+        Assert.Equal("43", response.Headers.GetValues("Retry-After").Single());
+    }
+
+    [Fact]
     public async Task SetsRateLimitHeaders_WhenRequestDenied()
     {
         using var server = BuildServer(new FakeRateLimitStore(allowed: false, remaining: 0, limit: 3, retryAfter: TimeSpan.FromSeconds(10)), 3, TimeSpan.FromMinutes(1));

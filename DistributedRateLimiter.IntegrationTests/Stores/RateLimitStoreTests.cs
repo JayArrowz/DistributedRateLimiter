@@ -49,6 +49,14 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
     private static string Unique() => $"key_{Guid.NewGuid():N}";
 
     [SkippableFact]
+    public async Task EnsureSchemaAsync_IsIdempotent()
+    {
+        SkipIfUnavailable();
+        // Should not throw when called a second time (CREATE TABLE IF NOT EXISTS).
+        await Store.EnsureSchemaAsync();
+    }
+
+    [SkippableFact]
     public async Task SlidingWindow_AllowsRequestsWithinLimit()
     {
         SkipIfUnavailable();
@@ -267,6 +275,16 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
     }
 
     [SkippableFact]
+    public async Task FixedWindow_RetryAfterIsZeroWhenAllowed()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        var r = await Store.FixedWindowAsync(key, 5, TimeSpan.FromMinutes(1));
+        Assert.True(r.Allowed);
+        Assert.Equal(TimeSpan.Zero, r.RetryAfter);
+    }
+
+    [SkippableFact]
     public async Task FixedWindow_RemainingDecrementsCorrectly()
     {
         SkipIfUnavailable();
@@ -340,6 +358,16 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         var r = await Store.TokenBucketAsync(key, capacity, refillRatePerSecond: 0.0001);
         Assert.False(r.Allowed);
         Assert.Equal(0, r.Remaining);
+    }
+
+    [SkippableFact]
+    public async Task TokenBucket_RetryAfterIsZeroWhenAllowed()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        var r = await Store.TokenBucketAsync(key, 5, refillRatePerSecond: 1);
+        Assert.True(r.Allowed);
+        Assert.Equal(TimeSpan.Zero, r.RetryAfter);
     }
 
     [SkippableFact]
@@ -453,6 +481,31 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         var r = await Store.SlidingWindowAsync(key, limit, window);
         Assert.True(r.Allowed, "Should be allowed once old rows have been purged");
         Assert.Equal(limit - 1, r.Remaining);
+    }
+
+    /// <summary>
+    /// Inserts a row with a recent timestamp and verifies it survives a purge
+    /// with a longer <paramref name="maxAge"/> — proving the age filter is respected.
+    /// </summary>
+    [SkippableFact]
+    public async Task PurgeExpired_DoesNotDeleteRowsWithinMaxAge()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int limit = 3;
+        var window = TimeSpan.FromMinutes(5);
+
+        // Insert a row that is 10 seconds old.
+        var recent = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10);
+        await InsertRowDirectlyAsync(ConnectionString!, _tableName, key, recent);
+
+        // Purge with maxAge = 1 minute — the 10-second-old row must survive.
+        await Store.PurgeExpiredAsync(TimeSpan.FromMinutes(1));
+
+        // The row is still there, so this request sees count = 2 (existing + new).
+        var r = await Store.SlidingWindowAsync(key, limit, window);
+        Assert.True(r.Allowed, "Recent rows must not be deleted by PurgeExpiredAsync");
+        Assert.Equal(limit - 2, r.Remaining); // existing row + this request = 2 counted
     }
 
     /// <summary>
