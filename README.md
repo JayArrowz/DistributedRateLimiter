@@ -337,6 +337,17 @@ All three algorithms use a single atomic round-trip via `INSERT ... ON CONFLICT 
 
 **Minimum version:** PostgreSQL 9.5+ (required for `ON CONFLICT DO UPDATE`). PostgreSQL 12+ recommended.
 
+**Theoretical throughput** (single app instance, default pool of 100 connections):
+
+| Deployment | Round-trip latency | ~req/s |
+|---|---|---|
+| Localhost / same host | ~0.2 ms | ~500,000 |
+| Same datacenter / LAN | ~1 ms | ~100,000 |
+| Cloud, same region | ~2–5 ms | ~20,000–50,000 |
+| Cross-region | ~20–50 ms | ~2,000–5,000 |
+
+Formula: `Pool size ÷ Latency per query`. Each check is a single round-trip. With multiple app instances, total connections across all instances must stay below PostgreSQL's `max_connections` (default 100 on most managed services). Use [PgBouncer](https://www.pgbouncer.org/) in transaction mode to scale past this limit.
+
 **Package:** `Npgsql` 8.x+. Targets `net8.0`, `net9.0`, `net10.0`.
 
 ---
@@ -364,6 +375,17 @@ CREATE TABLE [__rate_limits] (
 ```
 
 Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts. Requires SQL Server 2022+ for the `GREATEST` function used in the token bucket algorithm.
+
+**Theoretical throughput** (single app instance, default pool of 100 connections):
+
+| Deployment | Round-trip latency | ~req/s |
+|---|---|---|
+| Localhost / same host | ~0.2 ms | ~500,000 |
+| Same datacenter / LAN | ~1 ms | ~100,000 |
+| Cloud, same region | ~2–5 ms | ~20,000–50,000 |
+| Cross-region | ~20–50 ms | ~2,000–5,000 |
+
+Each check is a single round-trip (`MERGE` + `SELECT` in one batch). SQL Server's default `max pool size` is 100 per connection string; increase via `Max Pool Size=N` in the connection string.
 
 **Package:** `Microsoft.Data.SqlClient` 6.x. Targets `net8.0`, `net9.0`, `net10.0`.
 
@@ -393,6 +415,17 @@ CREATE TABLE IF NOT EXISTS `__rate_limits` (
 > MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1. Each check is wrapped in a transaction with `SELECT ... FOR UPDATE` to guarantee atomicity — this requires InnoDB (the default engine since MySQL 5.5).
 
 **Minimum version:** MySQL 5.7+ or MariaDB 10.2+. `DATETIME(6)` microsecond precision requires MySQL 5.6+ / MariaDB 5.3+.
+
+**Theoretical throughput** (single app instance, default pool of 100 connections):
+
+| Deployment | Round-trip latency | ~req/s |
+|---|---|---|
+| Localhost / same host | ~0.4 ms | ~250,000 |
+| Same datacenter / LAN | ~2 ms | ~50,000 |
+| Cloud, same region | ~4–10 ms | ~10,000–25,000 |
+| Cross-region | ~20–50 ms | ~2,000–5,000 |
+
+Each check costs 2 round-trips (upsert + select within a transaction), so effective latency is roughly double that of the single-statement providers above. Tune pool size via `Max Pool Size=N` in the connection string.
 
 **Package:** `MySqlConnector` 2.x. Targets `net8.0`, `net9.0`, `net10.0`.
 
