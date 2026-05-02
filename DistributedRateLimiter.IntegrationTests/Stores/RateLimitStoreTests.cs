@@ -314,6 +314,33 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         Assert.Equal(window, r.RetryAfter);
     }
 
+    /// <summary>
+    /// Inserts rows into the PREVIOUS 1-minute bucket, then calls <see cref="IRateLimitStore.FixedWindowAsync"/>
+    /// and verifies the count resets to 1 — proving the window is clock-aligned, not an ever-growing counter.
+    /// </summary>
+    [SkippableFact]
+    public async Task FixedWindow_WindowBoundary_ResetsCountAtBoundary()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int limit = 3;
+        var window = TimeSpan.FromMinutes(1);
+
+        // Compute the start of the previous 1-minute bucket.
+        var now = DateTimeOffset.UtcNow;
+        var prevWindowStart = new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, TimeSpan.Zero)
+            - TimeSpan.FromMinutes(1);
+
+        // Fill the previous window completely so it would be over-limit if counted.
+        for (var i = 0; i < limit; i++)
+            await InsertRowDirectlyAsync(ConnectionString!, _tableName, key, prevWindowStart.AddMilliseconds(i));
+
+        // The current window is a fresh bucket — this must be the first request in it.
+        var r = await Store.FixedWindowAsync(key, limit, window);
+        Assert.True(r.Allowed, "Previous window rows must not count toward the current window");
+        Assert.Equal(limit - 1, r.Remaining);
+    }
+
     [SkippableFact]
     public async Task FixedWindow_KeysAreIsolated()
     {
