@@ -150,7 +150,7 @@ app.UseDbRateLimiter(
     keySelector: ctx => ctx.User.Identity?.Name
                      ?? ctx.Connection.RemoteIpAddress?.ToString()
                      ?? "anon",
-    policyName: ctx => ctx.User.Identity?.IsAuthenticated == true
+    policyNameSelector: ctx => ctx.User.Identity?.IsAuthenticated == true
         ? "authenticated"
         : "anonymous");
 ```
@@ -496,6 +496,7 @@ builder.Services.AddDbRateLimiter(new MyCustomStore(), opts => { ... });
 
 | Property | Default | Description |
 |---|---|---|
+| `StartupStagger` | `30 seconds` | Delay after application startup before the first cleanup run |
 | `MaxAge` | `2 hours` | Minimum age of a row before it is eligible for deletion |
 | `Interval` | `30 minutes` | How often the cleanup worker runs |
 
