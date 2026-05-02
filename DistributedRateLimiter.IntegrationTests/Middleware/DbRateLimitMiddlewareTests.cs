@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using NSubstitute;
 using Xunit;
 
 namespace DistributedRateLimiter.IntegrationTests.Middleware;
@@ -149,8 +150,12 @@ public sealed class DbRateLimitMiddlewareTests
         // Arrange two policies with different limits, chosen by a request header.
         const string premiumPolicy = "premium";
         const string standardPolicy = "standard";
-
-        var store = new FakeRateLimitStore(allowed: true, remaining: 99, limit: 100);
+        
+        var store = Substitute.For<IRateLimitStore>();
+        store.FixedWindowAsync(Arg.Any<string>(), 10, Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+             .Returns(new RateLimitResult(true, 9, 10, TimeSpan.Zero));
+        store.FixedWindowAsync(Arg.Any<string>(), 100, Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+             .Returns(new RateLimitResult(true, 99, 100, TimeSpan.Zero));
 
         var builder = new WebHostBuilder()
             .ConfigureServices(services =>
