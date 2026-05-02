@@ -36,7 +36,7 @@ internal sealed class DbRateLimitMiddleware
         if (!result.Allowed)
         {
             context.Response.Headers["Retry-After"] =
-                result.RetryAfter.TotalSeconds.ToString("0");
+                ((int)Math.Ceiling(result.RetryAfter.TotalSeconds)).ToString();
             context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
             await context.Response.WriteAsync(
                 "Rate limit exceeded. Please retry later.", context.RequestAborted);
