@@ -46,26 +46,38 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
     {
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
+        await using var lockCmd = conn.CreateCommand();
+        lockCmd.Transaction = tx;
+        lockCmd.CommandText = "SELECT pg_advisory_xact_lock(hashtext(@key)::bigint)";
+        lockCmd.Parameters.AddWithValue("key", key);
+        await lockCmd.ExecuteNonQueryAsync(ct);
+
+        await using var upsertCmd = conn.CreateCommand();
+        upsertCmd.Transaction = tx;
+        upsertCmd.CommandText = $"""
             INSERT INTO {_tableName} (key, window_start, count)
-            VALUES (
-                @key,
-                to_timestamp(
-                    floor(extract(epoch from now()) / @windowSeconds) * @windowSeconds
-                ),
-                1
-            )
+            VALUES (@key, clock_timestamp(), 1)
             ON CONFLICT (key, window_start)
-                DO UPDATE SET count = {_tableName}.count + 1
-            RETURNING count;
+                DO UPDATE SET count = {_tableName}.count + 1;
             """;
+        upsertCmd.Parameters.AddWithValue("key", key);
+        await upsertCmd.ExecuteNonQueryAsync(ct);
 
-        cmd.Parameters.AddWithValue("key", key);
-        cmd.Parameters.AddWithValue("windowSeconds", (int)window.TotalSeconds);
+        await using var countCmd = conn.CreateCommand();
+        countCmd.Transaction = tx;
+        countCmd.CommandText = $"""
+            SELECT COALESCE(SUM(count), 0)
+            FROM {_tableName}
+            WHERE key = @key
+              AND window_start > clock_timestamp() - @windowSeconds * interval '1 second';
+            """;
+        countCmd.Parameters.AddWithValue("key", key);
+        countCmd.Parameters.AddWithValue("windowSeconds", (int)window.TotalSeconds);
 
-        var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
+        var count = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+        await tx.CommitAsync(ct);
 
         return new RateLimitResult(
             Allowed: count <= limit,
@@ -151,7 +163,7 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText =
-            $"DELETE FROM {_tableName} WHERE window_start < now() - @maxAge * interval '1 second'";
+            $"DELETE FROM {_tableName} WHERE window_start < now() - @maxAge * interval '1 second' AND window_start != '-infinity'";
         cmd.Parameters.AddWithValue("maxAge", (int)maxAge.TotalSeconds);
 
         await cmd.ExecuteNonQueryAsync(ct);

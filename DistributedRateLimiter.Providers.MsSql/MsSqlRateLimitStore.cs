@@ -52,34 +52,45 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+        using var tx = conn.BeginTransaction();
 
-        // MERGE + HOLDLOCK gives atomicity. Two statements in one batch —
-        // MERGE does the upsert, SELECT returns the updated count.
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            DECLARE @windowStart DATETIMEOFFSET =
-                DATEADD(
-                    SECOND,
-                    (DATEDIFF(SECOND, '19700101', SYSUTCDATETIME()) / @windowSeconds) * @windowSeconds,
-                    '19700101'
-                );
+        await using var lockCmd = conn.CreateCommand();
+        lockCmd.Transaction = tx;
+        lockCmd.CommandText = """
+            DECLARE @res INT;
+            EXEC @res = sp_getapplock @Resource=@lockResource, @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=30000;
+            IF @res < 0 RAISERROR('Failed to acquire rate limit lock', 16, 1);
+            """;
+        lockCmd.Parameters.Add(new SqlParameter("lockResource", key));
+        await lockCmd.ExecuteNonQueryAsync(ct);
 
+        await using var upsertCmd = conn.CreateCommand();
+        upsertCmd.Transaction = tx;
+        upsertCmd.CommandText = $"""
+            DECLARE @ts DATETIME2 = SYSUTCDATETIME();
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
-            USING (SELECT @key AS [key], @windowStart AS window_start) AS source
+            USING (SELECT @key AS [key], @ts AS window_start) AS source
                 ON target.[key] = source.[key] AND target.window_start = source.window_start
             WHEN MATCHED THEN
                 UPDATE SET count = target.count + 1
             WHEN NOT MATCHED THEN
-                INSERT ([key], window_start, count) VALUES (@key, @windowStart, 1);
-
-            SELECT count FROM [{_tableName}]
-            WHERE [key] = @key AND window_start = @windowStart;
+                INSERT ([key], window_start, count) VALUES (@key, @ts, 1);
             """;
+        upsertCmd.Parameters.Add(new SqlParameter("key", key));
+        await upsertCmd.ExecuteNonQueryAsync(ct);
 
-        cmd.Parameters.Add(new SqlParameter("key", key));
-        cmd.Parameters.Add(new SqlParameter("windowSeconds", (int)window.TotalSeconds));
+        await using var countCmd = conn.CreateCommand();
+        countCmd.Transaction = tx;
+        countCmd.CommandText = $"""
+            SELECT COALESCE(SUM(count), 0) FROM [{_tableName}]
+            WHERE [key] = @key
+              AND window_start > DATEADD(SECOND, -@windowSeconds, SYSUTCDATETIME());
+            """;
+        countCmd.Parameters.Add(new SqlParameter("key", key));
+        countCmd.Parameters.Add(new SqlParameter("windowSeconds", (int)window.TotalSeconds));
 
-        var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
+        var count = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+        await tx.CommitAsync(ct);
 
         return new RateLimitResult(
             Allowed: count <= limit,
@@ -101,16 +112,16 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
+            DECLARE @result TABLE (count INT);
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
             USING (SELECT @key AS [key], @windowStart AS window_start) AS source
                 ON target.[key] = source.[key] AND target.window_start = source.window_start
             WHEN MATCHED THEN
                 UPDATE SET count = target.count + 1
             WHEN NOT MATCHED THEN
-                INSERT ([key], window_start, count) VALUES (@key, @windowStart, 1);
-
-            SELECT count FROM [{_tableName}]
-            WHERE [key] = @key AND window_start = @windowStart;
+                INSERT ([key], window_start, count) VALUES (@key, @windowStart, 1)
+            OUTPUT INSERTED.count INTO @result;
+            SELECT count FROM @result;
             """;
 
         cmd.Parameters.Add(new SqlParameter("key", key));
@@ -139,6 +150,7 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
+            DECLARE @result TABLE (tokens FLOAT);
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
             USING (SELECT @key AS [key], @sentinel AS window_start) AS source
                 ON target.[key] = source.[key] AND target.window_start = source.window_start
@@ -154,10 +166,9 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
                     last_refill = SYSUTCDATETIME()
             WHEN NOT MATCHED THEN
                 INSERT ([key], window_start, tokens, last_refill)
-                VALUES (@key, @sentinel, @capacity - 1, SYSUTCDATETIME());
-
-            SELECT tokens FROM [{_tableName}]
-            WHERE [key] = @key AND window_start = @sentinel;
+                VALUES (@key, @sentinel, @capacity - 1, SYSUTCDATETIME())
+            OUTPUT INSERTED.tokens INTO @result;
+            SELECT tokens FROM @result;
             """;
 
         cmd.Parameters.Add(new SqlParameter("key", key));
@@ -183,9 +194,11 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         await conn.OpenAsync(ct);
 
         await using var cmd = conn.CreateCommand();
+        var sentinel = new DateTimeOffset(1, 1, 1, 0, 0, 0, TimeSpan.Zero);
         cmd.CommandText =
-            $"DELETE FROM [{_tableName}] WHERE window_start < DATEADD(SECOND, -@maxAgeSeconds, SYSUTCDATETIME())";
+            $"DELETE FROM [{_tableName}] WHERE window_start < DATEADD(SECOND, -@maxAgeSeconds, SYSUTCDATETIME()) AND window_start != @sentinel";
         cmd.Parameters.Add(new SqlParameter("maxAgeSeconds", (int)maxAge.TotalSeconds));
+        cmd.Parameters.Add(new SqlParameter("sentinel", sentinel));
 
         await cmd.ExecuteNonQueryAsync(ct);
     }

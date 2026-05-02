@@ -11,7 +11,7 @@ Works in HTTP pipelines **and** background services — any code that calls an e
 
 ## How it works
 
-Each rate limit check is a single atomic SQL upsert. The counter lives in a table in your existing database, so all running instances share the same state automatically — no in-memory counters that diverge across pods.
+Each rate limit check is handled atomically in your existing database, so all running instances share the same state automatically — no in-memory counters that diverge across pods.
 
 ```
 Instance A                          Instance B
@@ -266,7 +266,7 @@ The worker starts with a 30-second delay on boot so it doesn't fire immediately 
 
 ### SlidingWindow
 
-Divides time into buckets aligned to the window duration. Each request increments the counter for the current bucket. Provides smooth, consistent enforcement with no burst at window boundaries.
+Records each request as a timestamped row and counts all rows within the rolling window using `SUM`. Provides true sliding enforcement — a burst of 100 requests is measured against the exact 60-second window ending *now*, not against a clock-aligned bucket.
 
 ```csharp
 new RateLimitPolicy
@@ -333,7 +333,7 @@ CREATE TABLE IF NOT EXISTS __rate_limits (
 );
 ```
 
-All three algorithms use a single atomic round-trip via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`.
+FixedWindow and TokenBucket use a single atomic round-trip via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. SlidingWindow uses an advisory lock (`pg_advisory_xact_lock`) inside a transaction to serialize per-key access while inserting a timestamped row and computing a rolling SUM.
 
 **Minimum version:** PostgreSQL 9.5+ (required for `ON CONFLICT DO UPDATE`). PostgreSQL 12+ recommended.
 
