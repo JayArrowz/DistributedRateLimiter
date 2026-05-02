@@ -346,7 +346,12 @@ FixedWindow and TokenBucket use a single atomic round-trip via `INSERT ... ON CO
 | Cloud, same region | ~2–5 ms | ~20,000–50,000 |
 | Cross-region | ~20–50 ms | ~2,000–5,000 |
 
-Formula: `Pool size ÷ Latency per query`. Each check is a single round-trip. With multiple app instances, total connections across all instances must stay below PostgreSQL's `max_connections` (default 100 on most managed services). Use [PgBouncer](https://www.pgbouncer.org/) in transaction mode to scale past this limit.
+Formula: `Pool size ÷ (Latency × round-trips)`. Round-trip count varies by algorithm:
+
+- **FixedWindow / TokenBucket** — 1 round-trip (`INSERT ... ON CONFLICT DO UPDATE ... RETURNING`)
+- **SlidingWindow** — 3 round-trips (advisory lock + upsert + count query, all inside a transaction)
+
+With multiple app instances, total connections across all instances must stay below PostgreSQL's `max_connections` (default 100 on most managed services). Use [PgBouncer](https://www.pgbouncer.org/) in transaction mode to scale past this limit.
 
 **Package:** `Npgsql` 8.x+. Targets `net8.0`, `net9.0`, `net10.0`.
 
@@ -385,7 +390,12 @@ Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts. Requires SQL Server 2022+ f
 | Cloud, same region | ~2–5 ms | ~20,000–50,000 |
 | Cross-region | ~20–50 ms | ~2,000–5,000 |
 
-Each check is a single round-trip (`MERGE` + `SELECT` in one batch). SQL Server's default `max pool size` is 100 per connection string; increase via `Max Pool Size=N` in the connection string.
+Round-trip count varies by algorithm:
+
+- **FixedWindow / TokenBucket** — 1 round-trip (`MERGE ... OUTPUT` in a single batch)
+- **SlidingWindow** — 3 round-trips (`sp_getapplock` + upsert + count query, all inside a transaction)
+
+SQL Server's default `max pool size` is 100 per connection string; increase via `Max Pool Size=N` in the connection string.
 
 **Package:** `Microsoft.Data.SqlClient` 6.x. Targets `net8.0`, `net9.0`, `net10.0`.
 
@@ -425,7 +435,12 @@ CREATE TABLE IF NOT EXISTS `__rate_limits` (
 | Cloud, same region | ~4–10 ms | ~10,000–25,000 |
 | Cross-region | ~20–50 ms | ~2,000–5,000 |
 
-Each check costs 2 round-trips (upsert + select within a transaction), so effective latency is roughly double that of the single-statement providers above. Tune pool size via `Max Pool Size=N` in the connection string.
+Round-trip count varies by algorithm:
+
+- **FixedWindow / TokenBucket** — 2 round-trips (upsert + affected-rows read, MySQL does not support `RETURNING`)
+- **SlidingWindow** — 4 round-trips (`GET_LOCK` + upsert + count query + `RELEASE_LOCK`)
+
+Tune pool size via `Max Pool Size=N` in the connection string.
 
 **Package:** `MySqlConnector` 2.x. Targets `net8.0`, `net9.0`, `net10.0`.
 
@@ -491,8 +506,20 @@ builder.Services.AddDbRateLimiter(new MyCustomStore(), opts => { ... });
 A database-backed rate limiter is a good fit when:
 
 - Your stack does not already include Redis
-- Traffic is moderate — up to a few hundred requests per second per key
 - You need distributed enforcement across instances without adding infrastructure
 - You are already on a supported database for other purposes
 
-If you are already running Redis, or a single key receives thousands of requests per second, a Redis-backed limiter will offer lower latency and higher throughput.
+**Throughput guide for a single hot key** (cloud, same region):
+
+| Algorithm | Per-key limit | Why |
+|---|---|---|
+| FixedWindow / TokenBucket | ~10,000–50,000 req/s | Single atomic statement, no serialization |
+| SlidingWindow | ~70–170 req/s | Advisory lock serializes all requests for the same key; effective latency is `3 × DB round-trip` |
+
+For most real-world rate limit keys (per-user, per-IP, per-tenant) traffic rarely exceeds a few hundred requests per second on any single key, so all three algorithms are a practical fit. SlidingWindow becomes the bottleneck only when a single key is genuinely a hot path — in that case, switch to FixedWindow or TokenBucket, or use Redis.
+
+Consider Redis when:
+
+- A single key routinely receives thousands of requests per second and you need SlidingWindow semantics
+- You need sub-millisecond enforcement latency
+- You are already running Redis for caching or pub/sub
