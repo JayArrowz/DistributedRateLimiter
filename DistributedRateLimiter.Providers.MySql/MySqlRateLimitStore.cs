@@ -64,7 +64,7 @@ public sealed class MySqlRateLimitStore : IRateLimitStore
 
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        
+
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
 
         await using var cmd = conn.CreateCommand();
@@ -84,7 +84,6 @@ public sealed class MySqlRateLimitStore : IRateLimitStore
         DateTimeOffset? oldestWindowStart;
         await using (var reader = await cmd.ExecuteReaderAsync(ct))
         {
-            await reader.NextResultAsync(ct); // skip INSERT result, advance to SELECT
             await reader.ReadAsync(ct);
             count = Convert.ToInt32(reader[0]);
             oldestWindowStart = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1);
