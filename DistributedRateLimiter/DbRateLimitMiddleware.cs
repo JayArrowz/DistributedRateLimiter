@@ -9,26 +9,27 @@ internal sealed class DbRateLimitMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly IDbRateLimiter _limiter;
-    private readonly RateLimitPolicy _policy;
     private readonly Func<HttpContext, string> _keySelector;
+    private readonly Func<HttpContext, RateLimitPolicy> _policySelector;
 
     public DbRateLimitMiddleware(
         RequestDelegate next,
         IDbRateLimiter limiter,
         IOptions<DbRateLimiterOptions> options,
         Func<HttpContext, string> keySelector,
-        string policyName)
+        Func<HttpContext, string> policyNameSelector)
     {
         _next = next;
         _limiter = limiter;
         _keySelector = keySelector;
-        _policy = options.Value.GetPolicy(policyName);
+        var opts = options.Value;
+        _policySelector = ctx => opts.GetPolicy(policyNameSelector(ctx));
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
         var key = _keySelector(context);
-        var result = await _limiter.CheckAsync(key, _policy, context.RequestAborted);
+        var result = await _limiter.CheckAsync(key, _policySelector(context), context.RequestAborted);
 
         context.Response.Headers["X-RateLimit-Limit"] = result.Limit.ToString();
         context.Response.Headers["X-RateLimit-Remaining"] = result.Remaining.ToString();

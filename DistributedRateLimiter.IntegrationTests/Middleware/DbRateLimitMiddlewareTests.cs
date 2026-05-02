@@ -144,6 +144,46 @@ public sealed class DbRateLimitMiddlewareTests
     }
 
     [Fact]
+    public async Task DynamicPolicySelector_RoutesRequestToCorrectPolicy()
+    {
+        // Arrange two policies with different limits, chosen by a request header.
+        const string premiumPolicy = "premium";
+        const string standardPolicy = "standard";
+
+        var store = new FakeRateLimitStore(allowed: true, remaining: 99, limit: 100);
+
+        var builder = new WebHostBuilder()
+            .ConfigureServices(services =>
+            {
+                services.AddDbRateLimiter(store, opts =>
+                {
+                    opts.AddPolicy(new RateLimitPolicy { Name = premiumPolicy, Algorithm = RateLimitAlgorithm.FixedWindow, Limit = 100, Window = TimeSpan.FromMinutes(1) });
+                    opts.AddPolicy(new RateLimitPolicy { Name = standardPolicy, Algorithm = RateLimitAlgorithm.FixedWindow, Limit = 10, Window = TimeSpan.FromMinutes(1) });
+                });
+            })
+            .Configure(app =>
+            {
+                app.UseDbRateLimiter(
+                    keySelector: ctx => ctx.Connection.RemoteIpAddress?.ToString() ?? "test",
+                    policyNameSelector: ctx => ctx.Request.Headers.ContainsKey("X-Premium") ? premiumPolicy : standardPolicy);
+                app.Run(ctx => ctx.Response.WriteAsync("OK"));
+            });
+
+        using var server = new TestServer(builder);
+        using var client = server.CreateClient();
+
+        // Without the header → standard policy (limit=10)
+        var standardResponse = await client.GetAsync("/");
+        Assert.Equal("10", standardResponse.Headers.GetValues("X-RateLimit-Limit").Single());
+
+        // With the header → premium policy (limit=100)
+        var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, "/");
+        request.Headers.Add("X-Premium", "1");
+        var premiumResponse = await client.SendAsync(request);
+        Assert.Equal("100", premiumResponse.Headers.GetValues("X-RateLimit-Limit").Single());
+    }
+
+    [Fact]
     public async Task CheckAsync_WithPolicyName_AllowsRequest_WhenWithinLimit()
     {
         var store = new FakeRateLimitStore(allowed: true, remaining: 4, limit: 5);
