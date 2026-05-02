@@ -98,20 +98,22 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
         TimeSpan window,
         CancellationToken ct = default)
     {
+        var windowStart = window.GetFixedWindowStart();
+
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             INSERT INTO {_tableName} (key, window_start, count)
-            VALUES (@key, date_trunc(@truncUnit, now()), 1)
+            VALUES (@key, @windowStart, 1)
             ON CONFLICT (key, window_start)
                 DO UPDATE SET count = {_tableName}.count + 1
             RETURNING count;
             """;
 
         cmd.Parameters.AddWithValue("key", key);
-        cmd.Parameters.AddWithValue("truncUnit", window.ToPostgresTruncUnit());
+        cmd.Parameters.AddWithValue("windowStart", windowStart);
 
         var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
 

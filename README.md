@@ -292,7 +292,7 @@ new RateLimitPolicy
 }
 ```
 
-> FixedWindow supports 1-minute, 1-hour, and 1-day windows on all providers. Use SlidingWindow for arbitrary durations.
+> FixedWindow supports any positive whole-number-of-seconds window on all providers. Buckets are aligned to the Unix epoch, so a 10-second window produces buckets at `00:00:00`, `00:00:10`, `00:00:20`, etc.
 
 ### TokenBucket
 

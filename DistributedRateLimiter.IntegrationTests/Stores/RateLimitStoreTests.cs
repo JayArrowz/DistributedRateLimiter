@@ -315,8 +315,8 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Inserts rows into the PREVIOUS 1-minute bucket, then calls <see cref="IRateLimitStore.FixedWindowAsync"/>
-    /// and verifies the count resets to 1 — proving the window is clock-aligned, not an ever-growing counter.
+    /// Inserts rows into the PREVIOUS bucket (epoch-aligned), then calls <see cref="IRateLimitStore.FixedWindowAsync"/>
+    /// and verifies the count resets to 1 — proving the window is epoch-aligned, not an ever-growing counter.
     /// </summary>
     [SkippableFact]
     public async Task FixedWindow_WindowBoundary_ResetsCountAtBoundary()
@@ -326,10 +326,11 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         const int limit = 3;
         var window = TimeSpan.FromMinutes(1);
 
-        // Compute the start of the previous 1-minute bucket.
-        var now = DateTimeOffset.UtcNow;
-        var prevWindowStart = new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, TimeSpan.Zero)
-            - TimeSpan.FromMinutes(1);
+        // Compute the start of the previous bucket using the same epoch-division logic as GetFixedWindowStart.
+        var windowSeconds = (long)window.TotalSeconds;
+        var unixNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var currentWindowStart = DateTimeOffset.FromUnixTimeSeconds(unixNow / windowSeconds * windowSeconds);
+        var prevWindowStart = currentWindowStart - window;
 
         // Fill the previous window completely so it would be over-limit if counted.
         for (var i = 0; i < limit; i++)
@@ -339,6 +340,27 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         var r = await Store.FixedWindowAsync(key, limit, window);
         Assert.True(r.Allowed, "Previous window rows must not count toward the current window");
         Assert.Equal(limit - 1, r.Remaining);
+    }
+
+    [SkippableFact]
+    public async Task FixedWindow_SubMinuteWindow_AllowsAndDeniesCorrectly()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int limit = 2;
+        var window = TimeSpan.FromSeconds(10);
+
+        var first = await Store.FixedWindowAsync(key, limit, window);
+        Assert.True(first.Allowed);
+        Assert.Equal(limit - 1, first.Remaining);
+
+        var second = await Store.FixedWindowAsync(key, limit, window);
+        Assert.True(second.Allowed);
+        Assert.Equal(0, second.Remaining);
+
+        var third = await Store.FixedWindowAsync(key, limit, window);
+        Assert.False(third.Allowed);
+        Assert.Equal(TimeSpan.FromSeconds(10), third.RetryAfter);
     }
 
     [SkippableFact]
