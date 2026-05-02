@@ -62,71 +62,44 @@ public sealed class MySqlRateLimitStore : IRateLimitStore
     {
         var windowSeconds = (int)window.TotalSeconds;
 
-        var lockKey = "rl:" + Convert.ToHexString(
-            System.Security.Cryptography.MD5.HashData(
-                System.Text.Encoding.UTF8.GetBytes(key)));
-
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+        
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
 
-        await using var acquireCmd = conn.CreateCommand();
-        acquireCmd.CommandText = "SELECT GET_LOCK(@lockKey, 30)";
-        acquireCmd.Parameters.AddWithValue("lockKey", lockKey);
-        var lockResult = Convert.ToInt32(await acquireCmd.ExecuteScalarAsync(ct));
-        if (lockResult != 1)
-            throw new TimeoutException("Failed to acquire advisory lock for rate limit sliding window.");
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"""
+            INSERT INTO `{_tableName}` (`key`, `window_start`, `count`)
+            VALUES (@key, UTC_TIMESTAMP(), 1)
+            ON DUPLICATE KEY UPDATE `count` = `count` + 1;
+            SELECT COALESCE(SUM(`count`), 0), MIN(`window_start`) FROM `{_tableName}`
+            WHERE `key` = @key
+              AND `window_start` > DATE_SUB(UTC_TIMESTAMP(), INTERVAL @windowSeconds SECOND);
+            """;
+        cmd.Parameters.AddWithValue("key", key);
+        cmd.Parameters.AddWithValue("windowSeconds", windowSeconds);
 
-        try
+        int count;
+        DateTimeOffset? oldestWindowStart;
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
         {
-            await using var tx = await conn.BeginTransactionAsync(ct);
-
-            await using var upsertCmd = conn.CreateCommand();
-            upsertCmd.Transaction = tx;
-            upsertCmd.CommandText = $"""
-                INSERT INTO `{_tableName}` (`key`, `window_start`, `count`)
-                VALUES (@key, UTC_TIMESTAMP(6), 1)
-                ON DUPLICATE KEY UPDATE `count` = `count` + 1;
-                """;
-            upsertCmd.Parameters.AddWithValue("key", key);
-            await upsertCmd.ExecuteNonQueryAsync(ct);
-
-            await using var countCmd = conn.CreateCommand();
-            countCmd.Transaction = tx;
-            countCmd.CommandText = $"""
-                SELECT COALESCE(SUM(`count`), 0), MIN(`window_start`) FROM `{_tableName}`
-                WHERE `key` = @key
-                  AND `window_start` > DATE_SUB(UTC_TIMESTAMP(6), INTERVAL @windowSeconds SECOND);
-                """;
-            countCmd.Parameters.AddWithValue("key", key);
-            countCmd.Parameters.AddWithValue("windowSeconds", windowSeconds);
-
-            int count;
-            DateTimeOffset? oldestWindowStart;
-            await using (var reader = await countCmd.ExecuteReaderAsync(ct))
-            {
-                await reader.ReadAsync(ct);
-                count = Convert.ToInt32(reader[0]);
-                oldestWindowStart = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1);
-            }
-            await tx.CommitAsync(ct);
-
-            var retryAfter = count > limit && oldestWindowStart.HasValue
-                ? oldestWindowStart.Value + window - DateTimeOffset.UtcNow
-                : TimeSpan.Zero;
-
-            return new RateLimitResult(
-                Allowed: count <= limit,
-                Remaining: Math.Max(0, limit - count),
-                Limit: limit,
-                RetryAfter: retryAfter);
+            await reader.NextResultAsync(ct); // skip INSERT result, advance to SELECT
+            await reader.ReadAsync(ct);
+            count = Convert.ToInt32(reader[0]);
+            oldestWindowStart = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1);
         }
-        finally
-        {
-            await using var releaseCmd = conn.CreateCommand();
-            releaseCmd.CommandText = "SELECT RELEASE_LOCK(@lockKey)";
-            releaseCmd.Parameters.AddWithValue("lockKey", lockKey);
-            await releaseCmd.ExecuteScalarAsync(CancellationToken.None);
-        }
+        await tx.CommitAsync(ct);
+
+        var retryAfter = count > limit && oldestWindowStart.HasValue
+            ? oldestWindowStart.Value + window - DateTimeOffset.UtcNow
+            : TimeSpan.Zero;
+
+        return new RateLimitResult(
+            Allowed: count <= limit,
+            Remaining: Math.Max(0, limit - count),
+            Limit: limit,
+            RetryAfter: retryAfter);
     }
 
     public async Task<RateLimitResult> FixedWindowAsync(

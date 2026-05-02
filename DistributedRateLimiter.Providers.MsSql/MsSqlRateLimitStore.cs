@@ -53,21 +53,11 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
         using var tx = conn.BeginTransaction();
-
-        await using var lockCmd = conn.CreateCommand();
-        lockCmd.Transaction = tx;
-        lockCmd.CommandText = """
-            DECLARE @res INT;
-            EXEC @res = sp_getapplock @Resource=@lockResource, @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=30000;
-            IF @res < 0 RAISERROR('Failed to acquire rate limit lock', 16, 1);
-            """;
-        lockCmd.Parameters.Add(new SqlParameter("lockResource", key));
-        await lockCmd.ExecuteNonQueryAsync(ct);
-
-        await using var upsertCmd = conn.CreateCommand();
-        upsertCmd.Transaction = tx;
-        upsertCmd.CommandText = $"""
-            DECLARE @ts DATETIME2 = SYSUTCDATETIME();
+        
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"""
+            DECLARE @ts DATETIME2 = DATEADD(SECOND, DATEDIFF(SECOND, CAST('2000-01-01' AS DATETIME2), SYSUTCDATETIME()), CAST('2000-01-01' AS DATETIME2));
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
             USING (SELECT @key AS [key], @ts AS window_start) AS source
                 ON target.[key] = source.[key] AND target.window_start = source.window_start
@@ -75,23 +65,16 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
                 UPDATE SET count = target.count + 1
             WHEN NOT MATCHED THEN
                 INSERT ([key], window_start, count) VALUES (@key, @ts, 1);
-            """;
-        upsertCmd.Parameters.Add(new SqlParameter("key", key));
-        await upsertCmd.ExecuteNonQueryAsync(ct);
-
-        await using var countCmd = conn.CreateCommand();
-        countCmd.Transaction = tx;
-        countCmd.CommandText = $"""
             SELECT COALESCE(SUM(count), 0), MIN(window_start) FROM [{_tableName}]
             WHERE [key] = @key
               AND window_start > DATEADD(SECOND, -@windowSeconds, SYSUTCDATETIME());
             """;
-        countCmd.Parameters.Add(new SqlParameter("key", key));
-        countCmd.Parameters.Add(new SqlParameter("windowSeconds", (int)window.TotalSeconds));
+        cmd.Parameters.Add(new SqlParameter("key", key));
+        cmd.Parameters.Add(new SqlParameter("windowSeconds", (int)window.TotalSeconds));
 
         int count;
         DateTimeOffset? oldestWindowStart;
-        await using (var reader = await countCmd.ExecuteReaderAsync(ct))
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
         {
             await reader.ReadAsync(ct);
             count = reader.GetInt32(0);

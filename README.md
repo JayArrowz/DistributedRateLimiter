@@ -266,7 +266,7 @@ The worker starts with a 30-second delay on boot so it doesn't fire immediately 
 
 ### SlidingWindow
 
-Records each request as a timestamped row and counts all rows within the rolling window using `SUM`. Provides true sliding enforcement — a burst of 100 requests is measured against the exact 60-second window ending *now*, not against a clock-aligned bucket.
+Buckets requests by key and second — all requests arriving within the same second increment a single shared row, then a rolling `SUM` counts all rows within the window. Provides true sliding enforcement — a burst of 100 requests is measured against the exact 60-second window ending *now*, not against a clock-aligned boundary. Concurrent requests within the same second are serialised by the database's row-level lock on the upsert, so no application-level advisory lock is needed.
 
 ```csharp
 new RateLimitPolicy
@@ -333,23 +333,31 @@ CREATE TABLE IF NOT EXISTS __rate_limits (
 );
 ```
 
-FixedWindow and TokenBucket use a single atomic round-trip via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. SlidingWindow uses an advisory lock (`pg_advisory_xact_lock`) inside a transaction to serialize per-key access while inserting a timestamped row and computing a rolling SUM.
+FixedWindow and TokenBucket use a single atomic round-trip via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. SlidingWindow uses a transaction with two statements — an upsert into a second-level bucket row and a rolling `SUM` count query. The `ON CONFLICT DO UPDATE` row-level lock serialises concurrent same-second requests, so no advisory lock is needed.
 
-**Minimum version:** PostgreSQL 9.5+ (required for `ON CONFLICT DO UPDATE`). PostgreSQL 12+ recommended.
+**Required features:**
 
-**Theoretical throughput** (single app instance, default pool of 100 connections):
+| Feature | Minimum version |
+|---|---|
+| `ON CONFLICT DO UPDATE` (upsert) | PostgreSQL 9.5 |
+| `RETURNING` clause | PostgreSQL 8.2 |
+| `DATE_TRUNC`, `clock_timestamp()` | PostgreSQL 8.1 |
 
-| Deployment | Round-trip latency | ~req/s |
-|---|---|---|
-| Localhost / same host | ~0.2 ms | ~500,000 |
-| Same datacenter / LAN | ~1 ms | ~100,000 |
-| Cloud, same region | ~2–5 ms | ~20,000–50,000 |
-| Cross-region | ~20–50 ms | ~2,000–5,000 |
+No extensions or special server configuration required. **Minimum: PostgreSQL 9.5.** PostgreSQL 12+ recommended.
 
-Formula: `Pool size ÷ (Latency × round-trips)`. Round-trip count varies by algorithm:
+**Theoretical throughput** (single app instance, pool of 100 connections, formula: `pool ÷ (latency × round-trips)`):
+
+| Deployment | Latency | FixedWindow / TokenBucket (1 RT) | SlidingWindow (4 RT) |
+|---|---|---|---|
+| Localhost / same host | ~0.2 ms | ~500,000 | ~125,000 |
+| Same datacenter / LAN | ~1 ms | ~100,000 | ~25,000 |
+| Cloud, same region | ~2–5 ms | ~20,000–50,000 | ~5,000–12,500 |
+| Cross-region | ~20–50 ms | ~2,000–5,000 | ~500–1,250 |
+
+Round-trip breakdown:
 
 - **FixedWindow / TokenBucket** — 1 round-trip (`INSERT ... ON CONFLICT DO UPDATE ... RETURNING`)
-- **SlidingWindow** — 3 round-trips (advisory lock + upsert + count query, all inside a transaction)
+- **SlidingWindow** — 4 round-trips (`BEGIN` + upsert + count query + `COMMIT`)
 
 With multiple app instances, total connections across all instances must stay below PostgreSQL's `max_connections` (default 100 on most managed services). Use [PgBouncer](https://www.pgbouncer.org/) in transaction mode to scale past this limit.
 
@@ -379,21 +387,33 @@ CREATE TABLE [__rate_limits] (
 );
 ```
 
-Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts. Requires SQL Server 2022+ for the `GREATEST` function used in the token bucket algorithm.
+Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts.
 
-**Theoretical throughput** (single app instance, default pool of 100 connections):
+**Required features:**
 
-| Deployment | Round-trip latency | ~req/s |
+| Feature | Minimum version | Used by |
 |---|---|---|
-| Localhost / same host | ~0.2 ms | ~500,000 |
-| Same datacenter / LAN | ~1 ms | ~100,000 |
-| Cloud, same region | ~2–5 ms | ~20,000–50,000 |
-| Cross-region | ~20–50 ms | ~2,000–5,000 |
+| `MERGE` with `HOLDLOCK` | SQL Server 2008 | All algorithms |
+| `DATETIMEOFFSET` | SQL Server 2008 | All algorithms |
+| `OUTPUT` clause on `MERGE` | SQL Server 2008 | FixedWindow, TokenBucket |
+| `SYSUTCDATETIME()` | SQL Server 2008 | All algorithms |
+| `GREATEST()` | **SQL Server 2022** | TokenBucket only |
 
-Round-trip count varies by algorithm:
+Minimum: SQL Server 2008 for FixedWindow and SlidingWindow. **SQL Server 2022+ is required for the TokenBucket algorithm** due to the `GREATEST()` function.
+
+**Theoretical throughput** (single app instance, pool of 100 connections, formula: `pool ÷ (latency × round-trips)`):
+
+| Deployment | Latency | FixedWindow / TokenBucket (1 RT) | SlidingWindow (3 RT) |
+|---|---|---|---|
+| Localhost / same host | ~0.2 ms | ~500,000 | ~165,000 |
+| Same datacenter / LAN | ~1 ms | ~100,000 | ~33,000 |
+| Cloud, same region | ~2–5 ms | ~20,000–50,000 | ~7,000–17,000 |
+| Cross-region | ~20–50 ms | ~2,000–5,000 | ~650–1,650 |
+
+Round-trip breakdown:
 
 - **FixedWindow / TokenBucket** — 1 round-trip (`MERGE ... OUTPUT` in a single batch)
-- **SlidingWindow** — 3 round-trips (`sp_getapplock` + upsert + count query, all inside a transaction)
+- **SlidingWindow** — 3 round-trips (`BEGIN TX` + `MERGE; SELECT` batch + `COMMIT`)
 
 SQL Server's default `max pool size` is 100 per connection string; increase via `Max Pool Size=N` in the connection string.
 
@@ -422,23 +442,34 @@ CREATE TABLE IF NOT EXISTS `__rate_limits` (
 );
 ```
 
-> MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1. SlidingWindow uses `GET_LOCK`/`RELEASE_LOCK` advisory locks around a transaction to serialise per-key access; FixedWindow and TokenBucket use `INSERT ... ON DUPLICATE KEY UPDATE` which is atomic without an explicit lock — this requires InnoDB (the default engine since MySQL 5.5).
+MySQL/MariaDB does not support `RETURNING` on upserts so FixedWindow and TokenBucket cost 2 round-trips instead of 1. SlidingWindow uses a multi-statement batch (`INSERT ... ON DUPLICATE KEY UPDATE` + `SELECT`) inside a `READ COMMITTED` transaction — InnoDB row-level locking on the upsert serialises concurrent same-second requests without an advisory lock.
 
-**Minimum version:** MySQL 5.7+ or MariaDB 10.2+. `DATETIME(6)` microsecond precision requires MySQL 5.6+ / MariaDB 5.3+.
+**Required features:**
 
-**Theoretical throughput** (single app instance, default pool of 100 connections):
-
-| Deployment | Round-trip latency | ~req/s |
+| Feature | Minimum version | Used by |
 |---|---|---|
-| Localhost / same host | ~0.4 ms | ~250,000 |
-| Same datacenter / LAN | ~2 ms | ~50,000 |
-| Cloud, same region | ~4–10 ms | ~10,000–25,000 |
-| Cross-region | ~20–50 ms | ~2,000–5,000 |
+| `INSERT ... ON DUPLICATE KEY UPDATE` | MySQL 4.1 / MariaDB 5.1 | All algorithms |
+| `DATETIME(6)` (microsecond precision) | MySQL 5.6 / MariaDB 5.3 | All algorithms |
+| `GREATEST()`, `LEAST()` | MySQL 5.0 / MariaDB 5.0 | TokenBucket |
+| InnoDB storage engine | MySQL 5.5 (default) / MariaDB 5.5 (default) | SlidingWindow concurrency |
+| `READ COMMITTED` isolation level | MySQL 5.0 / MariaDB 5.0 | SlidingWindow |
+| Multi-statement queries | MySQL 5.0 / MariaDB 5.0 | SlidingWindow |
 
-Round-trip count varies by algorithm:
+**Minimum: MySQL 5.6+ or MariaDB 5.3+.** InnoDB is required for SlidingWindow; MyISAM is not supported. Multi-statement queries and `READ COMMITTED` isolation are supported by MySqlConnector with no additional connection string options.
 
-- **FixedWindow / TokenBucket** — 2 round-trips (upsert + affected-rows read, MySQL does not support `RETURNING`)
-- **SlidingWindow** — 4 round-trips (`GET_LOCK` + upsert + count query + `RELEASE_LOCK`)
+**Theoretical throughput** (single app instance, pool of 100 connections, formula: `pool ÷ (latency × round-trips)`):
+
+| Deployment | Latency | FixedWindow / TokenBucket (2 RT) | SlidingWindow (3 RT) |
+|---|---|---|---|
+| Localhost / same host | ~0.4 ms | ~125,000 | ~83,000 |
+| Same datacenter / LAN | ~2 ms | ~25,000 | ~16,000 |
+| Cloud, same region | ~4–10 ms | ~5,000–12,500 | ~3,000–8,000 |
+| Cross-region | ~20–50 ms | ~1,000–2,500 | ~650–1,650 |
+
+Round-trip breakdown:
+
+- **FixedWindow / TokenBucket** — 2 round-trips (upsert + select, MySQL does not support `RETURNING`)
+- **SlidingWindow** — 3 round-trips (`BEGIN TX` + `INSERT; SELECT` batch + `COMMIT`)
 
 Tune pool size via `Max Pool Size=N` in the connection string.
 
@@ -514,8 +545,8 @@ A database-backed rate limiter is a good fit when:
 
 | Algorithm | Per-key limit | Why |
 |---|---|---|
-| FixedWindow / TokenBucket | ~10,000–50,000 req/s | Single atomic statement, no serialization |
-| SlidingWindow | ~70–170 req/s | Advisory lock serializes all requests for the same key; effective latency is `3 × DB round-trip` |
+| FixedWindow / TokenBucket | ~10,000–50,000 req/s | Single atomic statement, no serialisation |
+| SlidingWindow | ~5,000–12,500 req/s | Pool-bound (same as tables above); row-level lock held only during the upsert, not the full transaction |}
 
 For most real-world rate limit keys (per-user, per-IP, per-tenant) traffic rarely exceeds a few hundred requests per second on any single key, so all three algorithms are a practical fit. SlidingWindow becomes the bottleneck only when a single key is genuinely a hot path — in that case, switch to FixedWindow or TokenBucket, or use Redis.
 

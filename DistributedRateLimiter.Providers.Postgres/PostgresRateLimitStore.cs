@@ -46,19 +46,14 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
     {
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+        
         await using var tx = await conn.BeginTransactionAsync(ct);
-
-        await using var lockCmd = conn.CreateCommand();
-        lockCmd.Transaction = tx;
-        lockCmd.CommandText = "SELECT pg_advisory_xact_lock(hashtext(@key)::bigint)";
-        lockCmd.Parameters.AddWithValue("key", key);
-        await lockCmd.ExecuteNonQueryAsync(ct);
 
         await using var upsertCmd = conn.CreateCommand();
         upsertCmd.Transaction = tx;
         upsertCmd.CommandText = $"""
             INSERT INTO {_tableName} (key, window_start, count)
-            VALUES (@key, clock_timestamp(), 1)
+            VALUES (@key, DATE_TRUNC('second', clock_timestamp()), 1)
             ON CONFLICT (key, window_start)
                 DO UPDATE SET count = {_tableName}.count + 1;
             """;
