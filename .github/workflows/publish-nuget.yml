@@ -107,7 +107,7 @@ jobs:
           dotnet pack DistributedRateLimiter.Core/DistributedRateLimiter.Core.csproj $PACK_ARGS
           dotnet pack DistributedRateLimiter/DistributedRateLimiter.csproj $PACK_ARGS
           dotnet pack DistributedRateLimiter.Providers.MsSql/DistributedRateLimiter.Providers.MsSql.csproj $PACK_ARGS
-          dotnet pack DbRateLimiter.Providers.MySql/DbRateLimiter.Providers.MySql.csproj $PACK_ARGS
+          dotnet pack DistributedRateLimiter.Providers.MySql/DistributedRateLimiter.Providers.MySql.csproj $PACK_ARGS
           dotnet pack DistributedRateLimiter.Providers.Postgres/DistributedRateLimiter.Providers.Postgres.csproj $PACK_ARGS
 
       - name: Validate packages
@@ -119,7 +119,7 @@ jobs:
             "DistributedRateLimiter.Core"
             "DistributedRateLimiter"
             "DistributedRateLimiter.Providers.MsSql"
-            "DbRateLimiter.Providers.MySql"
+            "DistributedRateLimiter.Providers.MySql"
             "DistributedRateLimiter.Providers.Postgres"
           )
 
@@ -172,7 +172,7 @@ jobs:
           echo "### 📦 Published Packages" >> $GITHUB_STEP_SUMMARY
           echo "| Package | NuGet |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          for pkg in DistributedRateLimiter.Core DistributedRateLimiter DistributedRateLimiter.Providers.MsSql DbRateLimiter.Providers.MySql DistributedRateLimiter.Providers.Postgres; do
+          for pkg in DistributedRateLimiter.Core DistributedRateLimiter DistributedRateLimiter.Providers.MsSql DistributedRateLimiter.Providers.MySql DistributedRateLimiter.Providers.Postgres; do
             echo "| \`${pkg}\` | [${pkg} v${VERSION}](https://www.nuget.org/packages/${pkg}/${VERSION}) |" >> $GITHUB_STEP_SUMMARY
           done
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -208,7 +208,7 @@ jobs:
         run: |
           VERSION="${{ steps.extract_version.outputs.version }}"
           echo "🎉 Successfully published DistributedRateLimiter v${VERSION} to NuGet!"
-          for pkg in DistributedRateLimiter.Core DistributedRateLimiter DistributedRateLimiter.Providers.MsSql DbRateLimiter.Providers.MySql DistributedRateLimiter.Providers.Postgres; do
+          for pkg in DistributedRateLimiter.Core DistributedRateLimiter DistributedRateLimiter.Providers.MsSql DistributedRateLimiter.Providers.MySql DistributedRateLimiter.Providers.Postgres; do
             echo "📦 https://www.nuget.org/packages/${pkg}/${VERSION}"
           done
           if [ "${{ github.event_name }}" == "release" ]; then

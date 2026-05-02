@@ -335,6 +335,8 @@ CREATE TABLE IF NOT EXISTS __rate_limits (
 
 All three algorithms use a single atomic round-trip via `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`.
 
+**Minimum version:** PostgreSQL 9.5+ (required for `ON CONFLICT DO UPDATE`). PostgreSQL 12+ recommended.
+
 **Package:** `Npgsql` 8.x+. Targets `net8.0`, `net9.0`, `net10.0`.
 
 ---
@@ -388,7 +390,9 @@ CREATE TABLE IF NOT EXISTS `__rate_limits` (
 );
 ```
 
-> MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1.
+> MySQL/MariaDB does not support `RETURNING` on upserts so each check costs 2 round-trips instead of 1. Each check is wrapped in a transaction with `SELECT ... FOR UPDATE` to guarantee atomicity — this requires InnoDB (the default engine since MySQL 5.5).
+
+**Minimum version:** MySQL 5.7+ or MariaDB 10.2+. `DATETIME(6)` microsecond precision requires MySQL 5.6+ / MariaDB 5.3+.
 
 **Package:** `MySqlConnector` 2.x. Targets `net8.0`, `net9.0`, `net10.0`.
 
