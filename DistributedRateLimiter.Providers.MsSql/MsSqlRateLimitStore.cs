@@ -25,12 +25,12 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         cmd.CommandText = $"""
             IF OBJECT_ID(N'[{_tableName}]', N'U') IS NULL
             CREATE TABLE [{_tableName}] (
-                key          NVARCHAR(512)  NOT NULL,
+                [key]        NVARCHAR(512)  NOT NULL,
                 window_start DATETIMEOFFSET NOT NULL,
                 count        INT            NOT NULL DEFAULT 0,
                 tokens       FLOAT          NULL,
                 last_refill  DATETIMEOFFSET NULL,
-                PRIMARY KEY (key, window_start)
+                PRIMARY KEY ([key], window_start)
             );
             IF NOT EXISTS (
                 SELECT 1 FROM sys.indexes
@@ -65,15 +65,15 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
                 );
 
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
-            USING (SELECT @key AS key, @windowStart AS window_start) AS source
-                ON target.key = source.key AND target.window_start = source.window_start
+            USING (SELECT @key AS [key], @windowStart AS window_start) AS source
+                ON target.[key] = source.[key] AND target.window_start = source.window_start
             WHEN MATCHED THEN
                 UPDATE SET count = target.count + 1
             WHEN NOT MATCHED THEN
-                INSERT (key, window_start, count) VALUES (@key, @windowStart, 1);
+                INSERT ([key], window_start, count) VALUES (@key, @windowStart, 1);
 
             SELECT count FROM [{_tableName}]
-            WHERE key = @key AND window_start = @windowStart;
+            WHERE [key] = @key AND window_start = @windowStart;
             """;
 
         cmd.Parameters.Add(new SqlParameter("key", key));
@@ -102,15 +102,15 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
-            USING (SELECT @key AS key, @windowStart AS window_start) AS source
-                ON target.key = source.key AND target.window_start = source.window_start
+            USING (SELECT @key AS [key], @windowStart AS window_start) AS source
+                ON target.[key] = source.[key] AND target.window_start = source.window_start
             WHEN MATCHED THEN
                 UPDATE SET count = target.count + 1
             WHEN NOT MATCHED THEN
-                INSERT (key, window_start, count) VALUES (@key, @windowStart, 1);
+                INSERT ([key], window_start, count) VALUES (@key, @windowStart, 1);
 
             SELECT count FROM [{_tableName}]
-            WHERE key = @key AND window_start = @windowStart;
+            WHERE [key] = @key AND window_start = @windowStart;
             """;
 
         cmd.Parameters.Add(new SqlParameter("key", key));
@@ -140,8 +140,8 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
-            USING (SELECT @key AS key, @sentinel AS window_start) AS source
-                ON target.key = source.key AND target.window_start = source.window_start
+            USING (SELECT @key AS [key], @sentinel AS window_start) AS source
+                ON target.[key] = source.[key] AND target.window_start = source.window_start
             WHEN MATCHED THEN
                 UPDATE SET
                     tokens = GREATEST(-1,
@@ -153,11 +153,11 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
                         ) - 1),
                     last_refill = SYSUTCDATETIME()
             WHEN NOT MATCHED THEN
-                INSERT (key, window_start, tokens, last_refill)
+                INSERT ([key], window_start, tokens, last_refill)
                 VALUES (@key, @sentinel, @capacity - 1, SYSUTCDATETIME());
 
             SELECT tokens FROM [{_tableName}]
-            WHERE key = @key AND window_start = @sentinel;
+            WHERE [key] = @key AND window_start = @sentinel;
             """;
 
         cmd.Parameters.Add(new SqlParameter("key", key));
