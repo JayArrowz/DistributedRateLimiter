@@ -28,6 +28,7 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         string connectionString, string tableName, string key, DateTimeOffset windowStart);
 
     protected IRateLimitStore Store { get; private set; } = null!;
+    protected string TableName => _tableName;
 
     public async Task InitializeAsync()
     {
@@ -42,12 +43,12 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
         await DropTestTableAsync(ConnectionString, _tableName);
     }
 
-    private void SkipIfUnavailable() =>
+    protected void SkipIfUnavailable() =>
         Skip.If(ConnectionString is null,
             $"{ProviderName} connection string not set. " +
             "Provide it via the appropriate environment variable.");
 
-    private static string Unique() => $"key_{Guid.NewGuid():N}";
+    protected static string Unique() => $"key_{Guid.NewGuid():N}";
 
     [SkippableFact]
     public async Task EnsureSchemaAsync_IsIdempotent()

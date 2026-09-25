@@ -397,6 +397,7 @@ Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts.
 | `DATETIMEOFFSET` | SQL Server 2008 | All algorithms |
 | `OUTPUT` clause on `MERGE` | SQL Server 2008 | FixedWindow, TokenBucket |
 | `SYSUTCDATETIME()` | SQL Server 2008 | All algorithms |
+| `DATEDIFF_BIG()` | SQL Server 2016 | TokenBucket |
 | `LEAST()` | **SQL Server 2022** | TokenBucket only |
 
 Minimum: SQL Server 2008 for FixedWindow and SlidingWindow. **SQL Server 2022+ is required for the TokenBucket algorithm** due to the `LEAST()` function.

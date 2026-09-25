@@ -45,4 +45,36 @@ public sealed class MsSqlRateLimitStoreTests : RateLimitStoreTests
         cmd.Parameters.Add(new SqlParameter("ts", windowStart));
         await cmd.ExecuteNonQueryAsync();
     }
+
+    /// <summary>
+    /// A bucket idle for longer than ~24.8 days overflows an INT millisecond DATEDIFF,
+    /// so the refill must use DATEDIFF_BIG.
+    /// </summary>
+    [SkippableFact]
+    public async Task TokenBucket_LongIdleBucket_RefillsWithoutOverflow()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int capacity = 3;
+
+        for (var i = 0; i < capacity; i++)
+            await Store.TokenBucketAsync(key, capacity, refillRatePerSecond: 1);
+
+        await using (var conn = new SqlConnection(ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE [{TableName}]
+                SET last_refill = DATEADD(DAY, -30, SYSUTCDATETIME())
+                WHERE [key] = @key AND tokens IS NOT NULL
+                """;
+            cmd.Parameters.Add(new SqlParameter("key", key));
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var r = await Store.TokenBucketAsync(key, capacity, refillRatePerSecond: 1);
+        Assert.True(r.Allowed);
+        Assert.Equal(capacity - 1, r.Remaining);
+    }
 }

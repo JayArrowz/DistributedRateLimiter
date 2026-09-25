@@ -151,14 +151,14 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
             WHEN MATCHED AND LEAST(
                     CAST(@capacity AS FLOAT),
                     target.tokens +
-                    DATEDIFF(MILLISECOND, target.last_refill, SYSUTCDATETIME())
+                    DATEDIFF_BIG(MILLISECOND, target.last_refill, SYSUTCDATETIME())
                     / 1000.0 * @refillRate
                 ) >= 1 THEN
                 UPDATE SET
                     tokens = LEAST(
                         CAST(@capacity AS FLOAT),
                         target.tokens +
-                        DATEDIFF(MILLISECOND, target.last_refill, SYSUTCDATETIME())
+                        DATEDIFF_BIG(MILLISECOND, target.last_refill, SYSUTCDATETIME())
                         / 1000.0 * @refillRate
                     ) - 1,
                     last_refill = SYSUTCDATETIME()
