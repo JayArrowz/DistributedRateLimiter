@@ -397,9 +397,9 @@ Uses `MERGE ... WITH (HOLDLOCK)` for atomic upserts.
 | `DATETIMEOFFSET` | SQL Server 2008 | All algorithms |
 | `OUTPUT` clause on `MERGE` | SQL Server 2008 | FixedWindow, TokenBucket |
 | `SYSUTCDATETIME()` | SQL Server 2008 | All algorithms |
-| `GREATEST()` | **SQL Server 2022** | TokenBucket only |
+| `LEAST()` | **SQL Server 2022** | TokenBucket only |
 
-Minimum: SQL Server 2008 for FixedWindow and SlidingWindow. **SQL Server 2022+ is required for the TokenBucket algorithm** due to the `GREATEST()` function.
+Minimum: SQL Server 2008 for FixedWindow and SlidingWindow. **SQL Server 2022+ is required for the TokenBucket algorithm** due to the `LEAST()` function.
 
 **Theoretical throughput** (single app instance, pool of 100 connections, formula: `pool ÷ (latency × round-trips)`):
 
@@ -450,10 +450,10 @@ MySQL/MariaDB does not support `RETURNING` on upserts so FixedWindow and TokenBu
 |---|---|---|
 | `INSERT ... ON DUPLICATE KEY UPDATE` | MySQL 4.1 / MariaDB 5.1 | All algorithms |
 | `DATETIME(6)` (microsecond precision) | MySQL 5.6 / MariaDB 5.3 | All algorithms |
-| `GREATEST()`, `LEAST()` | MySQL 5.0 / MariaDB 5.0 | TokenBucket |
+| `LEAST()` | MySQL 5.0 / MariaDB 5.0 | TokenBucket |
 | InnoDB storage engine | MySQL 5.5 (default) / MariaDB 5.5 (default) | SlidingWindow concurrency |
 | `READ COMMITTED` isolation level | MySQL 5.0 / MariaDB 5.0 | SlidingWindow |
-| Multi-statement queries | MySQL 5.0 / MariaDB 5.0 | SlidingWindow |
+| Multi-statement queries | MySQL 5.0 / MariaDB 5.0 | SlidingWindow, TokenBucket |
 
 **Minimum: MySQL 5.6+ or MariaDB 5.3+.** InnoDB is required for SlidingWindow; MyISAM is not supported. Multi-statement queries and `READ COMMITTED` isolation are supported by MySqlConnector with no additional connection string options.
 
@@ -468,7 +468,8 @@ MySQL/MariaDB does not support `RETURNING` on upserts so FixedWindow and TokenBu
 
 Round-trip breakdown:
 
-- **FixedWindow / TokenBucket** — 2 round-trips (upsert + select, MySQL does not support `RETURNING`)
+- **FixedWindow** — 2 round-trips (upsert + select, MySQL does not support `RETURNING`)
+- **TokenBucket** — 2 round-trips when allowed (`INSERT; SELECT ... FOR UPDATE` batch + `UPDATE`), 1 when denied (denied requests are not charged a token)
 - **SlidingWindow** — 3 round-trips (`BEGIN TX` + `INSERT; SELECT` batch + `COMMIT`)
 
 Tune pool size via `Max Pool Size=N` in the connection string.

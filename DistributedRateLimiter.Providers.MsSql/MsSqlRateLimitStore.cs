@@ -148,15 +148,19 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
             MERGE [{_tableName}] WITH (HOLDLOCK) AS target
             USING (SELECT @key AS [key], @sentinel AS window_start) AS source
                 ON target.[key] = source.[key] AND target.window_start = source.window_start
-            WHEN MATCHED THEN
+            WHEN MATCHED AND LEAST(
+                    CAST(@capacity AS FLOAT),
+                    target.tokens +
+                    DATEDIFF(MILLISECOND, target.last_refill, SYSUTCDATETIME())
+                    / 1000.0 * @refillRate
+                ) >= 1 THEN
                 UPDATE SET
-                    tokens = GREATEST(-1,
-                        LEAST(
-                            CAST(@capacity AS FLOAT),
-                            target.tokens +
-                            DATEDIFF(MILLISECOND, target.last_refill, SYSUTCDATETIME())
-                            / 1000.0 * @refillRate
-                        ) - 1),
+                    tokens = LEAST(
+                        CAST(@capacity AS FLOAT),
+                        target.tokens +
+                        DATEDIFF(MILLISECOND, target.last_refill, SYSUTCDATETIME())
+                        / 1000.0 * @refillRate
+                    ) - 1,
                     last_refill = SYSUTCDATETIME()
             WHEN NOT MATCHED THEN
                 INSERT ([key], window_start, tokens, last_refill)
@@ -170,12 +174,14 @@ public sealed class MsSqlRateLimitStore : IRateLimitStore
         cmd.Parameters.Add(new SqlParameter("capacity", capacity));
         cmd.Parameters.Add(new SqlParameter("refillRate", refillRatePerSecond));
 
-        var tokens = (double)(await cmd.ExecuteScalarAsync(ct))!;
-        var allowed = tokens >= 0;
+        // An empty OUTPUT means the matched row had less than one token and was left
+        // untouched, so the denied request is not charged and last_refill keeps accruing.
+        var tokens = await cmd.ExecuteScalarAsync(ct) as double?;
+        var allowed = tokens.HasValue;
 
         return new RateLimitResult(
             Allowed: allowed,
-            Remaining: (int)Math.Max(0, Math.Floor(tokens)),
+            Remaining: (int)Math.Max(0, Math.Floor(tokens ?? 0)),
             Limit: capacity,
             RetryAfter: allowed
                 ? TimeSpan.Zero

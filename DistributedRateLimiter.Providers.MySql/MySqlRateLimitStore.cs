@@ -156,43 +156,56 @@ public sealed class MySqlRateLimitStore : IRateLimitStore
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
-        await using var upsertCmd = conn.CreateCommand();
-        upsertCmd.Transaction = tx;
-        upsertCmd.CommandText = $"""
-            INSERT INTO `{_tableName}` (`key`, `window_start`, `tokens`, `last_refill`)
-            VALUES (@key, @sentinel, @capacity - 1, UTC_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE
-                `tokens` = GREATEST(-1,
-                    LEAST(
-                        @capacity,
-                        `tokens` + TIMESTAMPDIFF(MICROSECOND, `last_refill`, UTC_TIMESTAMP(6))
-                        / 1000000.0 * @refillRate
-                    ) - 1),
-                `last_refill` = UTC_TIMESTAMP(6);
-            """;
-        upsertCmd.Parameters.AddWithValue("key", key);
-        upsertCmd.Parameters.AddWithValue("sentinel", sentinel);
-        upsertCmd.Parameters.AddWithValue("capacity", capacity);
-        upsertCmd.Parameters.AddWithValue("refillRate", refillRatePerSecond);
-        await upsertCmd.ExecuteNonQueryAsync(ct);
-
+        // Create a full bucket if missing, then lock the row and read the refilled balance.
         await using var selectCmd = conn.CreateCommand();
         selectCmd.Transaction = tx;
         selectCmd.CommandText = $"""
-            SELECT `tokens` FROM `{_tableName}`
+            INSERT INTO `{_tableName}` (`key`, `window_start`, `tokens`, `last_refill`)
+            VALUES (@key, @sentinel, @capacity, UTC_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE `key` = `key`;
+            SELECT LEAST(
+                @capacity,
+                `tokens` + TIMESTAMPDIFF(MICROSECOND, `last_refill`, UTC_TIMESTAMP(6))
+                / 1000000.0 * @refillRate
+            ) FROM `{_tableName}`
             WHERE `key` = @key AND `window_start` = @sentinel
             FOR UPDATE;
             """;
         selectCmd.Parameters.AddWithValue("key", key);
         selectCmd.Parameters.AddWithValue("sentinel", sentinel);
-        var tokens = (double)(await selectCmd.ExecuteScalarAsync(ct))!;
+        selectCmd.Parameters.AddWithValue("capacity", capacity);
+        selectCmd.Parameters.AddWithValue("refillRate", refillRatePerSecond);
+        var available = Convert.ToDouble(await selectCmd.ExecuteScalarAsync(ct));
+
+        // Only charge a token when the request is allowed; a denied request leaves the row
+        // untouched so last_refill keeps accruing towards the next token.
+        var allowed = available >= 1;
+        if (allowed)
+        {
+            await using var updateCmd = conn.CreateCommand();
+            updateCmd.Transaction = tx;
+            updateCmd.CommandText = $"""
+                UPDATE `{_tableName}` SET
+                    `tokens` = LEAST(
+                        @capacity,
+                        `tokens` + TIMESTAMPDIFF(MICROSECOND, `last_refill`, UTC_TIMESTAMP(6))
+                        / 1000000.0 * @refillRate
+                    ) - 1,
+                    `last_refill` = UTC_TIMESTAMP(6)
+                WHERE `key` = @key AND `window_start` = @sentinel;
+                """;
+            updateCmd.Parameters.AddWithValue("key", key);
+            updateCmd.Parameters.AddWithValue("sentinel", sentinel);
+            updateCmd.Parameters.AddWithValue("capacity", capacity);
+            updateCmd.Parameters.AddWithValue("refillRate", refillRatePerSecond);
+            await updateCmd.ExecuteNonQueryAsync(ct);
+        }
 
         await tx.CommitAsync(ct);
 
-        var allowed = tokens >= 0;
         return new RateLimitResult(
             Allowed: allowed,
-            Remaining: (int)Math.Max(0, Math.Floor(tokens)),
+            Remaining: allowed ? (int)Math.Max(0, Math.Floor(available - 1)) : 0,
             Limit: capacity,
             RetryAfter: allowed
                 ? TimeSpan.Zero

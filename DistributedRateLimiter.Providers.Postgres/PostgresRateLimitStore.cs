@@ -133,18 +133,24 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
 
+        // The conflict WHERE leaves the row untouched when less than one token is available,
+        // so denied requests neither consume a token nor reset last_refill.
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             INSERT INTO {_tableName} (key, window_start, tokens, last_refill)
             VALUES (@key, '-infinity', @capacity - 1, now())
             ON CONFLICT (key, window_start) DO UPDATE SET
-                tokens = GREATEST(-1,
-                    LEAST(@capacity,
-                        {_tableName}.tokens +
-                        EXTRACT(EPOCH FROM (now() - {_tableName}.last_refill))
-                        * @refillRate
-                    ) - 1),
+                tokens = LEAST(@capacity,
+                    {_tableName}.tokens +
+                    EXTRACT(EPOCH FROM (now() - {_tableName}.last_refill))
+                    * @refillRate
+                ) - 1,
                 last_refill = now()
+            WHERE LEAST(@capacity,
+                {_tableName}.tokens +
+                EXTRACT(EPOCH FROM (now() - {_tableName}.last_refill))
+                * @refillRate
+            ) >= 1
             RETURNING tokens;
             """;
 
@@ -152,12 +158,13 @@ public sealed class PostgresRateLimitStore : IRateLimitStore
         cmd.Parameters.AddWithValue("capacity", capacity);
         cmd.Parameters.AddWithValue("refillRate", refillRatePerSecond);
 
-        var tokens = (double)(await cmd.ExecuteScalarAsync(ct))!;
-        var allowed = tokens >= 0;
+        // No row returned means the update was skipped: the request is denied.
+        var tokens = await cmd.ExecuteScalarAsync(ct) as double?;
+        var allowed = tokens.HasValue;
 
         return new RateLimitResult(
             Allowed: allowed,
-            Remaining: (int)Math.Max(0, Math.Floor(tokens)),
+            Remaining: (int)Math.Max(0, Math.Floor(tokens ?? 0)),
             Limit: capacity,
             RetryAfter: allowed
                 ? TimeSpan.Zero

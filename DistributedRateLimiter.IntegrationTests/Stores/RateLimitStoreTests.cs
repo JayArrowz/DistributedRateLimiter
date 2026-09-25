@@ -1,4 +1,5 @@
 using DistributedRateLimiter.Core.Interface;
+using DistributedRateLimiter.Core.Model;
 using Xunit;
 
 namespace DistributedRateLimiter.IntegrationTests.Stores;
@@ -491,6 +492,33 @@ public abstract class RateLimitStoreTests : IAsyncLifetime
 
         var r = await Store.TokenBucketAsync(key, capacity, refillRate);
         Assert.True(r.Allowed, "Token bucket should be allowed after refill delay");
+    }
+
+    /// <summary>
+    /// Denied requests must not consume tokens: a client that keeps retrying while
+    /// throttled should still be allowed once it waits the advertised RetryAfter.
+    /// </summary>
+    [SkippableFact]
+    public async Task TokenBucket_DeniedRequestsDoNotConsumeTokens()
+    {
+        SkipIfUnavailable();
+        var key = Unique();
+        const int capacity = 1;
+        const double refillRate = 4.0; // 1 token every 250 ms
+
+        await Store.TokenBucketAsync(key, capacity, refillRate); // consume the only token
+
+        RateLimitResult denied = null!;
+        for (var i = 0; i < 5; i++)
+        {
+            denied = await Store.TokenBucketAsync(key, capacity, refillRate);
+            Assert.False(denied.Allowed, $"Retry {i} should be denied");
+        }
+
+        await Task.Delay(denied.RetryAfter);
+
+        var r = await Store.TokenBucketAsync(key, capacity, refillRate);
+        Assert.True(r.Allowed, "Waiting RetryAfter should earn a token despite denied retries");
     }
 
     [SkippableFact]
