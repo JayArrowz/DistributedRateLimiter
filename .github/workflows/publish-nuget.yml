@@ -60,6 +60,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-release
     environment: production
+    permissions:
+      contents: write   # gh release upload
+      id-token: write   # OIDC token for NuGet trusted publishing
 
     steps:
       - name: Checkout
@@ -135,9 +138,17 @@ jobs:
 
           if [ "$ALL_OK" != "true" ]; then exit 1; fi
 
+      # Trusted publishing: exchange the GitHub OIDC token for a short-lived (1 hour)
+      # NuGet API key. Requested right before the push so it cannot expire mid-run.
+      - name: NuGet login (OIDC → temp API key)
+        id: nuget_login
+        uses: NuGet/login@v1
+        with:
+          user: JayArrowz # nuget.org username that owns the trusted publishing policy
+
       - name: Publish to NuGet.org
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
         run: |
           echo "🚀 Publishing packages to NuGet.org..."
           for pkg in ./artifacts/*.nupkg; do
